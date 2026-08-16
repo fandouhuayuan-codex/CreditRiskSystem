@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  backend:
+    build: ./backend
+    container_name: credit_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./models:/app/models
+    env_file:
+      - .env
+    command: ["/bin/bash", "-c", "./entrypoint.sh"]
+  frontend:
+    build: ./frontend
+    container_name: credit_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+    env_file:
+      - .env

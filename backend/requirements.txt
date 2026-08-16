@@ -1,0 +1,13 @@
+Django>=4.2
+djangorestframework
+django-cors-headers
+pandas
+numpy
+scikit-learn
+xgboost
+lightgbm
+imbalanced-learn
+joblib
+shap
+openpyxl
+uvicorn
