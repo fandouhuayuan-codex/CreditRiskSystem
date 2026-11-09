@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, average_precision_score, precision_recall_curve
 from imblearn.over_sampling import SMOTE
 import xgboost as xgb
 import lightgbm as lgb
@@ -20,7 +20,18 @@ class MLService:
     def __init__(self, df: pd.DataFrame, label_col='default_payment'):
         self.df = df.copy()
         self.label_col = label_col
-        self.feature_cols = [c for c in df.columns if c != label_col and c != 'customer_id']
+        if self.label_col not in df.columns:
+            candidates = [c for c in df.columns if 'default' in c.lower() or 'payment' in c.lower()]
+            if candidates:
+                self.label_col = candidates[0]
+        self.feature_cols = [
+            c for c in df.columns
+            if c != self.label_col
+            and c != 'customer_id'
+            and c.upper() != 'ID'
+            and 'default' not in c.lower()
+            and 'payment' not in c.lower()
+        ]
         self.scaler = StandardScaler()
         self.models = {}
         self.metrics = {}
@@ -28,13 +39,15 @@ class MLService:
     def preprocess(self):
         df = self.df.copy()
         for col in df.columns:
-            if col == self.label_col or col == 'customer_id':
+            if col == self.label_col or col == 'customer_id' or col.upper() == 'ID':
+                continue
+            if 'default' in col.lower() or 'payment' in col.lower():
                 continue
             if df[col].dtype.kind in 'biufc':
                 median = df[col].median()
                 df[col] = df[col].fillna(median)
             else:
-                df[col] = df[col].fillna('missing')
+                df[col] = df[col].fillna(0)
         self.df_clean = df
         X = df[self.feature_cols]
         y = df[self.label_col].astype(int)
@@ -43,7 +56,7 @@ class MLService:
         self.y = y
         return self.X, self.y
 
-    def train_test_split(self, test_size=0.2, random_state=42, shuffle=False):
+    def train_test_split(self, test_size=0.2, random_state=42, shuffle=True):
         X_train, X_test, y_train, y_test = train_test_split(
             self.X, self.y, test_size=test_size, random_state=random_state, shuffle=shuffle,
             stratify=self.y if shuffle else None
@@ -51,8 +64,8 @@ class MLService:
         self.X_train, self.X_test, self.y_train, self.y_test = X_train, X_test, y_train, y_test
         return X_train, X_test, y_train, y_test
 
-    def apply_smote(self, sampling_strategy=0.25, random_state=42):
-        sm = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state, n_jobs=-1)
+    def apply_smote(self, sampling_strategy=0.5, random_state=42):
+        sm = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
         X_res, y_res = sm.fit_resample(self.X_train, self.y_train)
         self.X_train_res, self.y_train_res = X_res, y_res
         return X_res, y_res
@@ -60,49 +73,81 @@ class MLService:
     def _evaluate(self, model, X, y_true):
         y_pred = model.predict(X)
         if hasattr(model, "predict_proba"):
-            y_proba = model.predict_proba(X)[:,1]
+            y_proba = model.predict_proba(X)[:, 1]
         else:
             try:
                 y_proba = model.decision_function(X)
-                y_proba = (y_proba - y_proba.min()) / (y_proba.max() - y_proba.min() + 1e-9)
+                if len(y_proba.shape) > 1:
+                    y_proba = y_proba[:, 1]
+                # 使用 sigmoid (Platt scaling) 将 decision_function 映射到 [0,1]
+                y_proba = 1.0 / (1.0 + np.exp(-y_proba))
             except:
                 y_proba = np.zeros_like(y_pred, dtype=float)
+        # 计算 KS 值
+        fpr, tpr, _ = roc_curve(y_true, y_proba)
+        ks = float(np.max(tpr - fpr))
+        # PR-AUC（平均精确率，在类别不平衡数据上比 ROC-AUC 更敏感）
+        pr_auc = float(average_precision_score(y_true, y_proba))
         metrics = {
             'accuracy': float(accuracy_score(y_true, y_pred)),
             'precision': float(precision_score(y_true, y_pred, zero_division=0)),
             'recall': float(recall_score(y_true, y_pred, zero_division=0)),
             'f1': float(f1_score(y_true, y_pred, zero_division=0)),
-            'auc': float(roc_auc_score(y_true, y_proba))
+            'auc': float(roc_auc_score(y_true, y_proba)),
+            'pr_auc': pr_auc,
+            'ks': ks
         }
         return metrics, y_proba
+
+    def get_roc_data(self, model, X, y_true):
+        """获取 ROC 曲线数据，用于前端可视化"""
+        if hasattr(model, "predict_proba"):
+            y_proba = model.predict_proba(X)[:, 1]
+        else:
+            try:
+                y_proba = model.decision_function(X)
+                if len(y_proba.shape) > 1:
+                    y_proba = y_proba[:, 1]
+                # 使用 sigmoid (Platt scaling)
+                y_proba = 1.0 / (1.0 + np.exp(-y_proba))
+            except:
+                return {'fpr': [], 'tpr': []}
+        fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+        # 降采样到最多 200 个点，避免数据过大
+        step = max(1, len(fpr) // 200)
+        return {
+            'fpr': [float(x) for x in fpr[::step]],
+            'tpr': [float(x) for x in tpr[::step]],
+            'auc': float(roc_auc_score(y_true, y_proba))
+        }
 
     def grid_search_cv(self, estimator, param_grid, X, y, cv=3, scoring='roc_auc', n_jobs=-1):
         grid = GridSearchCV(estimator=estimator, param_grid=param_grid, cv=cv, scoring=scoring, n_jobs=n_jobs)
         grid.fit(X, y)
         return grid.best_estimator_, grid.best_params_, grid.best_score_
 
-    def train_all(self, use_gridsearch=True):
+    def train_all(self, use_gridsearch=False):
         X_tr = self.X_train_res if hasattr(self, 'X_train_res') else self.X_train
         y_tr = self.y_train_res if hasattr(self, 'y_train_res') else self.y_train
         X_val = self.X_test
         y_val = self.y_test
 
-        # Logistic
+        # Logistic Regression
         lr = LogisticRegression(max_iter=1000)
         if use_gridsearch:
-            param_grid = {'C':[0.01,0.1,1,10]}
-            best_lr, best_params, best_score = self.grid_search_cv(lr, param_grid, X_tr, y_tr)
+            param_grid = {'C': [0.01, 0.1, 1, 10]}
+            best_lr, _, _ = self.grid_search_cv(lr, param_grid, X_tr, y_tr)
             lr = best_lr
         else:
             lr.fit(X_tr, y_tr)
         self.models['LogisticRegression'] = lr
         self.metrics['LogisticRegression'], _ = self._evaluate(lr, X_val, y_val)
 
-        # SVM
-        svm = SVC(probability=True)
+        # SVM (probability=False 加快训练，预测时用 decision_function)
+        svm = SVC(kernel='rbf', C=1.0, gamma='scale', probability=False, random_state=42)
         if use_gridsearch:
-            param_grid = {'C':[0.1,1], 'gamma':['scale'], 'kernel':['rbf']}
-            best_svm, best_params, best_score = self.grid_search_cv(svm, param_grid, X_tr, y_tr)
+            param_grid = {'C': [0.1, 1], 'gamma': ['scale'], 'kernel': ['rbf']}
+            best_svm, _, _ = self.grid_search_cv(svm, param_grid, X_tr, y_tr)
             svm = best_svm
         else:
             svm.fit(X_tr, y_tr)
@@ -112,8 +157,8 @@ class MLService:
         # RandomForest
         rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
         if use_gridsearch:
-            param_grid = {'n_estimators':[50,100], 'max_depth':[5,10,None]}
-            best_rf, best_params, best_score = self.grid_search_cv(rf, param_grid, X_tr, y_tr)
+            param_grid = {'n_estimators': [50, 100], 'max_depth': [5, 10, None]}
+            best_rf, _, _ = self.grid_search_cv(rf, param_grid, X_tr, y_tr)
             rf = best_rf
         else:
             rf.fit(X_tr, y_tr)
@@ -121,10 +166,10 @@ class MLService:
         self.metrics['RandomForest'], _ = self._evaluate(rf, X_val, y_val)
 
         # LightGBM
-        lgbm = lgb.LGBMClassifier(random_state=42)
+        lgbm = lgb.LGBMClassifier(random_state=42, verbose=-1)
         if use_gridsearch:
-            param_grid = {'num_leaves':[31,63], 'n_estimators':[100,200], 'learning_rate':[0.05,0.1]}
-            best_lgbm, best_params, best_score = self.grid_search_cv(lgbm, param_grid, X_tr, y_tr)
+            param_grid = {'num_leaves': [31, 63], 'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1]}
+            best_lgbm, _, _ = self.grid_search_cv(lgbm, param_grid, X_tr, y_tr)
             lgbm = best_lgbm
         else:
             lgbm.fit(X_tr, y_tr)
@@ -132,10 +177,10 @@ class MLService:
         self.metrics['LightGBM'], _ = self._evaluate(lgbm, X_val, y_val)
 
         # XGBoost
-        xgb_clf = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+        xgb_clf = xgb.XGBClassifier(eval_metric='logloss', random_state=42, use_label_encoder=False)
         if use_gridsearch:
-            param_grid = {'max_depth':[3,6], 'n_estimators':[100,200], 'learning_rate':[0.05,0.1]}
-            best_xgb, best_params, best_score = self.grid_search_cv(xgb_clf, param_grid, X_tr, y_tr)
+            param_grid = {'max_depth': [3, 6], 'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1]}
+            best_xgb, _, _ = self.grid_search_cv(xgb_clf, param_grid, X_tr, y_tr)
             xgb_clf = best_xgb
         else:
             xgb_clf.fit(X_tr, y_tr)
@@ -153,7 +198,7 @@ class MLService:
             model = self.models['XGBoost']
             try:
                 importances = model.feature_importances_
-                feat_imp = dict(zip(self.feature_cols, importances))
+                feat_imp = {k: float(v) for k, v in zip(self.feature_cols, importances)}
                 sorted_imp = dict(sorted(feat_imp.items(), key=lambda item: item[1], reverse=True)[:topn])
                 return sorted_imp
             except:
@@ -161,7 +206,7 @@ class MLService:
         if 'RandomForest' in self.models:
             model = self.models['RandomForest']
             importances = model.feature_importances_
-            feat_imp = dict(zip(self.feature_cols, importances))
+            feat_imp = {k: float(v) for k, v in zip(self.feature_cols, importances)}
             sorted_imp = dict(sorted(feat_imp.items(), key=lambda item: item[1], reverse=True)[:topn])
             return sorted_imp
         return {}
@@ -184,9 +229,14 @@ class MLService:
             self.models[model_name] = model
 
         if hasattr(model, 'predict_proba'):
-            proba = model.predict_proba(X_scaled)[:,1][0]
+            proba = model.predict_proba(X_scaled)[:, 1][0]
         else:
-            proba = model.decision_function(X_scaled)[0]
-            proba = (proba - proba.min())/(proba.max() - proba.min() + 1e-9)
+            decision = model.decision_function(X_scaled)
+            if len(decision.shape) > 1:
+                decision = decision[:, 1]
+            decision_val = decision[0] if hasattr(decision, '__len__') else decision
+            # 使用 sigmoid (Platt scaling) 将 decision_function 映射到 [0,1]
+            # 注意：不能用 min-max 归一化，因为单样本时 min=max，结果恒为 0
+            proba = 1.0 / (1.0 + np.exp(-float(decision_val)))
         label = int(proba >= threshold)
         return label, float(proba)

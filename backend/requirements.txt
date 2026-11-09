@@ -1,13 +1,32 @@
-Django>=4.2
-djangorestframework
-django-cors-headers
-pandas
-numpy
-scikit-learn
-xgboost
-lightgbm
-imbalanced-learn
-joblib
-shap
-openpyxl
-uvicorn
+# ============================================================
+# 银行信贷风险评估与可视化预警系统 —— 后端依赖
+# 环境：Python 3.10+（开发环境实际使用 Python 3.13）
+# 安装命令：pip install -r requirements.txt
+# 以下版本均为项目实际运行验证通过的版本
+# ============================================================
+
+# ---- Web 框架 ----
+Django==6.1
+djangorestframework==3.18.0
+django-cors-headers==4.9.0
+
+# ---- 数据处理 ----
+pandas==2.3.1
+numpy==2.3.2
+
+# ---- 机器学习 ----
+scikit-learn==1.9.0          # LR / SVM / RF、数据划分、指标、标准化
+scipy==1.18.0                # scikit-learn / shap 的底层科学计算依赖
+xgboost==3.4.1               # XGBoost 核心模型
+lightgbm==4.7.0              # LightGBM 模型
+imbalanced-learn==0.14.2     # SMOTE 过采样（处理类别不平衡）
+joblib==1.5.3                # 模型持久化保存/加载（.joblib）
+
+# ---- 模型可解释性 ----
+shap==0.52.0                 # SHAP 特征贡献度分析
+
+# ---- Excel 报告导出 ----
+openpyxl==3.1.5
+
+# ---- 生产部署（可选，本地 runserver 调试用不到）----
+uvicorn==0.52.3

@@ -1,12 +1,20 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
 media/
-models/*.joblib
-/node_modules/
-/dist/
-.env
+*.joblib
 db.sqlite3
 coverage/
+
+# Node
+node_modules/
+dist/
+
+# 环境与编辑器
+.env
 .idea/
 .vscode/
+
+# 临时文件
+_check_tmp/
